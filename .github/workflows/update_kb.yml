@@ -2,8 +2,8 @@ name: Update Knowledge Base
 
 on:
   schedule:
-    - cron: "0 10 * * *"   # 每天 UTC 10 点运行 ≈ 美国中部时间凌晨 4 点
-  workflow_dispatch:      # 允许你手动点一下运行
+    - cron: "0 10 * * *"   # 每天 UTC 10 点自动运行
+  workflow_dispatch:        # 允许你在 Actions 里手动点一次运行
 
 jobs:
   build-kb:
@@ -11,12 +11,12 @@ jobs:
 
     steps:
     - name: Checkout repository
-    - uses: actions/checkout@v3
+      uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: "3.10"
 
     - name: Install dependencies
       run: |
