@@ -32,10 +32,7 @@ for qa in reversed(st.session_state["history"]):
 
     # 如果没有命中任何知识库文档，用红色提示
     if not qa["docs"]:
-        st.markdown(
-            "<span style='color:red; font-weight:bold;'>目前知识库中没有相关信息，请咨询负责人或查看原始文档。</span>",
-            unsafe_allow_html=True,
-        )
+        st.error("目前知识库中没有相关信息，请在Google Docs里加上此问题，并截图发给同事，获得答案后记得更新哦。")
     else:
         # 正常情况就显示回答内容
         st.markdown(qa["answer"])
