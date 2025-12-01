@@ -1,0 +1,43 @@
+name: Update Knowledge Base
+
+on:
+  schedule:
+    - cron: "0 10 * * *"   # 每天 UTC 10 点运行 ≈ 美国中部时间凌晨 4 点
+  workflow_dispatch:      # 允许你手动点一下运行
+
+jobs:
+  build-kb:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Restore Google credentials
+      run: |
+        echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+        echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+
+    - name: Set environment variables
+      run: |
+        echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+
+    - name: Build KB index
+      run: python build_index.py
+
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Actions"
+        git add kb_chroma
+        git commit -m "Auto-update KB index" || echo "No changes to commit"
+        git push
