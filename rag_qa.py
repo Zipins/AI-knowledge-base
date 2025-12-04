@@ -1,3 +1,6 @@
+import os
+IS_CLOUD = os.getenv("IS_CLOUD", "false").lower() == "true"
+
 from typing import List, Tuple
 import re
 
