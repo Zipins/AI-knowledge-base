@@ -1,3 +1,6 @@
+import os
+os.environ["IS_CLOUD"] = "true"
+
 import streamlit as st
 from rag_qa import answer_question
 
