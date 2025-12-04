@@ -3,9 +3,7 @@ import re
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-
-# 复用你已有的 Drive 加载函数
-from load_kb import load_documents_from_drive
+from langchain_core.documents import Document  # 用于构造文档对象
 
 
 # 这里要和 build_index.py 里的一致
@@ -64,7 +62,7 @@ def format_docs(docs) -> str:
     return "\n\n".join(chunks)
 
 
-# ========= 关键字兜底相关函数（新加） =========
+# ========= 关键字兜底相关函数（不再访问 Google Drive，而是直接扫 Chroma） =========
 
 def extract_keywords_from_question(question: str) -> List[str]:
     """
@@ -74,7 +72,6 @@ def extract_keywords_from_question(question: str) -> List[str]:
       - “EPLI 保障什么” -> ["epli"]
       - “什么是COI证书” -> ["coi"]
     """
-    # 把类似 HO5 / HO-5 / DP3 / BOP / EPLI / COI 这些 token 抽出来
     raw_tokens = re.findall(r"[A-Za-z0-9\-]+", question)
     keywords: List[str] = []
 
@@ -97,32 +94,36 @@ def extract_keywords_from_question(question: str) -> List[str]:
     return uniq
 
 
-def keyword_fallback_search(question: str, max_hits: int = 5):
+def keyword_fallback_search(question: str, vectordb: Chroma, max_hits: int = 5) -> List[Document]:
     """
     关键字兜底搜索：
-    - 当向量检索里没有包含这些关键字的片段时，
-      从原始 Drive 文档里做一轮简单的“包含关键字”搜索。
+    - 不再访问 Google Drive；
+    - 直接从 Chroma 底层 collection 里把所有文本取出来做字符串匹配。
     """
     keywords = extract_keywords_from_question(question)
     if not keywords:
         return []
 
-    # 从 Drive 加载所有文档（数量不多，这样做没问题）
-    all_docs = load_documents_from_drive()
+    # 从 Chroma 底层取出所有文档内容和元数据
+    raw = vectordb._collection.get(include=["documents", "metadatas"])
+    documents = raw.get("documents") or []
+    metadatas = raw.get("metadatas") or []
 
-    hits = []
-    for d in all_docs:
-        text_lower = d.page_content.lower()
-        # 只要这个片段里至少包含一个关键字就可以
+    hits: List[Document] = []
+    for text, meta in zip(documents, metadatas):
+        if not text:
+            continue
+        text_lower = text.lower()
+        # 只要包含任意一个关键字就作为候选
         if any(kw in text_lower for kw in keywords):
-            hits.append(d)
+            hits.append(Document(page_content=text, metadata=meta or {}))
             if len(hits) >= max_hits:
                 break
 
     return hits
 
 
-def answer_question(question: str, k: int = 8) -> Tuple[str, List]:
+def answer_question(question: str, k: int = 8) -> Tuple[str, List[Document]]:
     """
     主函数：输入问题，返回（答案, 被引用的文档片段列表）。
 
@@ -130,7 +131,7 @@ def answer_question(question: str, k: int = 8) -> Tuple[str, List]:
     1. 向量检索 top_k 从 5 提高到 8；
     2. 如果问题里有像 HO5 / EPLI / COI 这种字母数字关键字，
        且向量检索的结果里没有包含这些关键字的内容，
-       则再做一次全文关键字兜底搜索，并把命中的片段追加进来。
+       则再在 Chroma 中做一次全文关键字兜底搜索，并把命中的片段追加进来。
     """
     vectordb = get_vectordb()
     # 第一步：正常的语义检索
@@ -140,12 +141,10 @@ def answer_question(question: str, k: int = 8) -> Tuple[str, List]:
     keywords = extract_keywords_from_question(question)
     if keywords:
         joined = "\n".join(d.page_content.lower() for d in docs)
-        # 看看当前检索结果里是否已经覆盖了这些关键字
         missing_keywords = [kw for kw in keywords if kw not in joined]
 
         if missing_keywords:
-            # 当前语义检索结果里完全没出现这些关键字 -> 做全文兜底搜索
-            extra_docs = keyword_fallback_search(question, max_hits=5)
+            extra_docs = keyword_fallback_search(question, vectordb, max_hits=5)
 
             # 把兜底命中的片段追加到 docs 里，避免重复
             existing_keys = set()
@@ -190,10 +189,14 @@ def answer_question(question: str, k: int = 8) -> Tuple[str, List]:
 
 
 if __name__ == "__main__":
-    while True:
-        q = input("\n请输入问题（输入 exit 退出）：")
-        if q.lower() in ["exit", "quit"]:
-            break
+    # 简单测试，可以按你自己的问题改
+    tests = [
+        "Ho5保单哪个公司能做？",
+        "EPLI 主要保什么？",
+    ]
+    for q in tests:
+        print("\n==============================")
+        print("问题：", q)
         ans, ds = answer_question(q)
-        print("\n回答：", ans)
-        print("引用片段数量：", len(ds))
+        print("回答：", ans)
+        print("引用的文档片段数量：", len(ds))
