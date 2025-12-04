@@ -1,5 +1,13 @@
 import streamlit as st
 from rag_qa import answer_question
+from build_index import build_index
+
+# ==== 知识库初始化（方案A：云端自动重建一次向量库） ====
+if "kb_built" not in st.session_state:
+    with st.spinner("正在初始化知识库（首次会稍微久一点）..."):
+        build_index()
+    st.session_state["kb_built"] = True
+# ==== 初始化结束 ====
 import os
 import streamlit as st
 
