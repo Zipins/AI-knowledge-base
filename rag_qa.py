@@ -9,7 +9,16 @@ import re
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import GoogleDriveLoader
-from langchain_core.documents import Document  # 用于构造文档对象
+# 兼容不同版本的 LangChain：优先用 langchain.schema，没有就退回老的写法
+try:
+    from langchain.schema import Document
+except ImportError:
+    try:
+        from langchain.docstore.document import Document
+    except ImportError:
+        # 实在没有就降级不用类型提示，避免导入时直接报错
+        Document = object
+
 
 
 # =============== 基本配置 ===============
