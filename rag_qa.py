@@ -1,143 +1,233 @@
-from typing import List, Tuple
+# rag_qa.py
+from typing import List, Tuple, Dict, Any
+import os
+import json
+import shutil
+import hashlib
 import re
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import GoogleDriveLoader
 from langchain_core.documents import Document  # 用于构造文档对象
 
 
-# 这里要和 build_index.py 里的一致
+# =============== 基本配置 ===============
+
+# 向量库持久化目录（要和以前 build_index.py 里保持一致）
 PERSIST_DIR = "kb_chroma"
 
+# 用来存 index 元数据（文档清单、hash 等）
+META_PATH = os.path.join(PERSIST_DIR, "kb_index_metadata.json")
+
+# 你的 Google Drive 知识库所在的 folder_id（建议放到环境变量里）
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "在这里填你的_folder_id")
 
 SYSTEM_PROMPT = """
 你是公司内部的知识库助手。
-你只能根据“提供给你的文档内容”来回答问题，禁止根据外部知识或臆测回答。
-
-你会收到两部分信息：
-1. 用户的问题
-2. 若干条与问题最相关的知识库内容（可能为 0 条，也可能很多条）
-
-回答规则：
-
-1. 如果有提供知识库内容（不为空）：
-   - 一定要认真阅读这些内容，从中找出和问题最相关的句子或段落。
-   - 尽量用自己的话，把文档里的信息整理成一段清晰、直接的回答。
-   - 即使文档没有逐字写出问题的答案，只要有接近的含义，也要根据文档内容做出“最合理的推断”，并可以加一句：
-     “以上结论仅根据当前知识库内容整理。”
-
-2. 如果完全没有提供任何知识库内容（为空）：
-   - 才可以回答类似：
-     “根据目前提供的知识库内容，我没有找到相关信息，请咨询负责人或查看原始文档。”
-   - 不能自己编造外部知识。
-
-3. 禁止的行为：
-   - 当已经给出了多条文档内容时，不允许说“没有相关信息”。
-   - 不要引用外部常识或网上资料，只能基于给出的内容作答。
-   - 不要重复问题本身，直接给出结论和必要的简短解释即可。
+❗️重要规则：
+1. 你只能根据“提供给你的文档内容”来回答问题，禁止用外部知识或瞎编。
+2. 如果文档里确实没有答案，就老实说“目前知识库中没有相关信息，请咨询负责人或查看原始文档”，不要猜。
+3. 回答要尽量简洁、直接，优先用中文。
 """
 
+# 全局缓存：最近一次加载的文档列表（给管理页面用）
+_last_loaded_docs: List[Document] = []
 
-def get_vectordb() -> Chroma:
-    """加载已经持久化好的 Chroma 向量库。"""
-    embeddings = OpenAIEmbeddings()
-    vectordb = Chroma(
-        embedding_function=embeddings,
+
+# =============== Embedding & LLM ===============
+
+def _get_embeddings():
+    # 你可以根据自己账户情况换模型
+    return OpenAIEmbeddings(model="text-embedding-3-small")
+
+
+def _get_llm():
+    return ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+
+# =============== 1. 从 Google Drive 加载文档 ===============
+
+def load_documents_from_drive() -> List[Document]:
+    """
+    从 Google Drive 加载所有知识库文档。
+    同时更新全局 _last_loaded_docs，供管理页面展示。
+    """
+    global _last_loaded_docs
+
+    loader = GoogleDriveLoader(
+        folder_id=GOOGLE_DRIVE_FOLDER_ID,
+        recursive=True,
+        file_types=["document"],  # 只要 Google Docs
+    )
+    docs = loader.load()
+    _last_loaded_docs = docs
+    return docs
+
+
+def _compute_manifest(docs: List[Document]) -> Dict[str, Any]:
+    """
+    根据文档的 metadata 生成一个“指纹”(manifest)，用来判断知识库是否有变动。
+    """
+    manifest: Dict[str, Any] = {}
+    for d in docs:
+        src = d.metadata.get("source", "unknown")
+        modified_time = d.metadata.get("modifiedTime", "")
+        title = d.metadata.get("title", "")
+        manifest[src] = {
+            "modifiedTime": modified_time,
+            "title": title,
+        }
+    return manifest
+
+
+def _hash_manifest(manifest: Dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+# =============== 2. 自动检测变更 + 重建向量库 ===============
+
+def _load_index_metadata() -> Dict[str, Any]:
+    if not os.path.exists(META_PATH):
+        return {}
+    with open(META_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_index_metadata(meta: Dict[str, Any]):
+    os.makedirs(PERSIST_DIR, exist_ok=True)
+    with open(META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def build_or_load_vectorstore(force_rebuild: bool = False) -> Chroma:
+    """
+    根据 Google Drive 文档情况自动决定：
+    - 没有 index → 新建
+    - 有 index 且文档没变 → 直接加载
+    - 文档有变 / 手动要求重建 → 删除旧 index + 重建
+    """
+    embeddings = _get_embeddings()
+
+    # 先从 Drive 拉一遍文档（顺便作为“真相来源”）
+    docs = load_documents_from_drive()
+    manifest = _compute_manifest(docs)
+    manifest_hash = _hash_manifest(manifest)
+
+    old_meta = _load_index_metadata()
+    old_hash = old_meta.get("manifest_hash")
+
+    need_rebuild = force_rebuild or (manifest_hash != old_hash)
+
+    if (not need_rebuild) and os.path.isdir(PERSIST_DIR):
+        # 不需要重建，直接加载现有向量库
+        vectordb = Chroma(
+            persist_directory=PERSIST_DIR,
+            embedding_function=embeddings,
+        )
+        return vectordb
+
+    # 需要重建：删旧库
+    shutil.rmtree(PERSIST_DIR, ignore_errors=True)
+
+    vectordb = Chroma.from_documents(
+        documents=docs,
+        embedding=embeddings,
         persist_directory=PERSIST_DIR,
     )
+    vectordb.persist()
+
+    # 保存新的 metadata
+    _save_index_metadata(
+        {
+            "manifest_hash": manifest_hash,
+            "doc_count": len(docs),
+            "docs": manifest,
+        }
+    )
+
     return vectordb
 
 
-def format_docs(docs) -> str:
-    """把检索出来的文档片段拼成一个大字符串，给模型当 context 用。"""
-    chunks = []
-    for i, d in enumerate(docs, start=1):
-        source = (
-            d.metadata.get("source")
-            or d.metadata.get("name")
-            or d.metadata.get("title")
-            or "Unknown"
-        )
-        chunks.append(f"[文档片段 {i} - 来源：{source}]\n{d.page_content}\n")
-    return "\n\n".join(chunks)
-
-
-# ========= 关键字兜底相关函数（不再访问 Google Drive，而是直接扫 Chroma） =========
+# =============== 3. 关键字提取 & 兜底检索 ===============
 
 def extract_keywords_from_question(question: str) -> List[str]:
     """
-    从问题里抽取可能有用的“字母数字”关键字，用于全文兜底搜索。
-    例如：
-      - “Ho5保单哪个公司能做” -> ["ho5"]
-      - “EPLI 保障什么” -> ["epli"]
-      - “什么是COI证书” -> ["coi"]
+    非严格版关键字提取：
+    - 支持中英混合，提取汉字词 + 字母数字串
+    - 过滤掉太短的词
     """
-    raw_tokens = re.findall(r"[A-Za-z0-9\-]+", question)
+    # 提取“连续的汉字或字母数字”
+    tokens = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9_.]+", question)
+    # 简单去掉一些非常常见的虚词（可以按需要扩展）
+    stop_words = {"的", "了", "吗", "呢", "啊", "请问", "可以", "怎么", "怎样"}
     keywords: List[str] = []
-
-    for tok in raw_tokens:
-        tok = tok.strip("-").lower()
-        if len(tok) < 2:
+    for t in tokens:
+        t2 = t.strip().lower()
+        if not t2:
             continue
-        # 非常短的纯数字意义不大（如“10”、“20”之类），先略过
-        if tok.isdigit() and len(tok) < 4:
+        if t2 in stop_words:
             continue
-        keywords.append(tok)
-
-    # 去重并保持顺序
-    seen = set()
-    uniq = []
-    for k in keywords:
-        if k not in seen:
-            seen.add(k)
-            uniq.append(k)
-    return uniq
+        if len(t2) <= 1:
+            continue
+        keywords.append(t2)
+    return keywords
 
 
-def keyword_fallback_search(question: str, vectordb: Chroma, max_hits: int = 5) -> List[Document]:
+def keyword_fallback_search(
+    question: str,
+    vectordb: Chroma,
+    max_hits: int = 5,
+) -> List[Document]:
     """
-    关键字兜底搜索：
-    - 不再访问 Google Drive；
-    - 直接从 Chroma 底层 collection 里把所有文本取出来做字符串匹配。
+    关键字兜底检索：
+    - 不再去重新从 Drive 拉文档，而是仍然基于同一个 vectordb 做“按关键字”的相似度搜索，
+      避免出现“兜底命中了一堆 ACA 医保文章”的情况。
     """
     keywords = extract_keywords_from_question(question)
     if not keywords:
         return []
 
-    # 从 Chroma 底层取出所有文档内容和元数据
-    raw = vectordb._collection.get(include=["documents", "metadatas"])
-    documents = raw.get("documents") or []
-    metadatas = raw.get("metadatas") or []
+    results: List[Document] = []
+    seen = set()
 
-    hits: List[Document] = []
-    for text, meta in zip(documents, metadatas):
-        if not text:
-            continue
-        text_lower = text.lower()
-        # 只要包含任意一个关键字就作为候选
-        if any(kw in text_lower for kw in keywords):
-            hits.append(Document(page_content=text, metadata=meta or {}))
-            if len(hits) >= max_hits:
+    # 每个关键词单独搜几条，然后合并去重
+    for kw in keywords:
+        hits = vectordb.similarity_search(kw, k=3)
+        for d in hits:
+            key = (d.metadata.get("source"), d.metadata.get("page", 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(d)
+            if len(results) >= max_hits:
                 break
+        if len(results) >= max_hits:
+            break
 
-    return hits
+    return results
 
 
-def answer_question(question: str, k: int = 8) -> Tuple[str, List[Document]]:
+# =============== 4. 对外主接口：回答问题 ===============
+
+def answer_question(
+    question: str,
+    k: int = 5,
+) -> Tuple[str, List[Document], Dict[str, Any]]:
     """
-    主函数：输入问题，返回（答案, 被引用的文档片段列表）。
-
-    升级点：
-    1. 向量检索 top_k 从 5 提高到 8；
-    2. 如果问题里有像 HO5 / EPLI / COI 这种字母数字关键字，
-       且向量检索的结果里没有包含这些关键字的内容，
-       则再在 Chroma 中做一次全文关键字兜底搜索，并把命中的片段追加进来。
+    返回：
+    - answer：模型回答
+    - docs：最终用于回答的文档片段列表
+    - debug_info：调试信息（用于前端显示命中的文档列表）
     """
-    vectordb = get_vectordb()
-    # 第一步：正常的语义检索
-    docs = vectordb.similarity_search(question, k=k)
+    llm = _get_llm()
+    vectordb = build_or_load_vectorstore(force_rebuild=False)
+    retriever = vectordb.as_retriever(search_kwargs={"k": k})
 
-    # 第二步：检查是否需要做关键字兜底
+    # 第一步：正常向量检索
+    docs = retriever.get_relevant_documents(question)
+
+    # 第二步：关键字兜底 —— 检查现有 docs 是否覆盖了问题中的关键字
     keywords = extract_keywords_from_question(question)
     if keywords:
         joined = "\n".join(d.page_content.lower() for d in docs)
@@ -145,51 +235,89 @@ def answer_question(question: str, k: int = 8) -> Tuple[str, List[Document]]:
 
         if missing_keywords:
             extra_docs = keyword_fallback_search(question, vectordb, max_hits=5)
-
-            # 把兜底命中的片段追加到 docs 里，避免重复
-            existing_keys = set()
-            for d in docs:
-                key = (
-                    d.metadata.get("source"),
-                    d.metadata.get("page"),
-                    hash(d.page_content),
-                )
-                existing_keys.add(key)
-
+            # 追加兜底命中的片段，注意去重
+            existing_keys = set(
+                (d.metadata.get("source"), d.metadata.get("page", 0)) for d in docs
+            )
             for d in extra_docs:
-                key = (
-                    d.metadata.get("source"),
-                    d.metadata.get("page"),
-                    hash(d.page_content),
-                )
+                key = (d.metadata.get("source"), d.metadata.get("page", 0))
                 if key not in existing_keys:
                     docs.append(d)
                     existing_keys.add(key)
 
-    # 第三步：把所有命中的片段给到模型
-    context = format_docs(docs)
+    # 构造上下文
+    context_parts = []
+    for i, d in enumerate(docs):
+        src = d.metadata.get("source", "")
+        title = d.metadata.get("title", "")
+        context_parts.append(
+            f"[文档{i+1}] 来源: {src}  标题: {title}\n内容片段:\n{d.page_content[:1200]}"
+        )
+    context = "\n\n".join(context_parts)
 
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+    prompt = f"""{SYSTEM_PROMPT}
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"用户问题：{question}\n\n"
-                f"以下是和问题最相关的知识库内容：\n{context}\n\n"
-                f"请严格根据以上内容回答用户的问题。"
-                f"若内容明显不足以回答，请直接说不知道。"
-            ),
-        },
-    ]
+用户问题：
+{question}
 
-    resp = llm.invoke(messages)
-    return resp.content, docs
+下面是从知识库检索到的相关内容（可能来自多个文档的片段）：
+{context}
+
+请严格根据上述内容回答问题：
+- 如果能找到明确回答，就直接用中文回答，条理清晰，尽量简短。
+- 如果文档中没有提到用户想知道的点，就回答：“目前知识库中没有相关信息，请咨询负责人或查看原始文档。”
+- 禁止凭空补充知识库中没有的信息。
+"""
+
+    answer = llm.invoke(prompt).content
+
+    debug_info: Dict[str, Any] = {
+        "retrieved_sources": [
+            {
+                "rank": i + 1,
+                "source": d.metadata.get("source", ""),
+                "title": d.metadata.get("title", ""),
+                "modifiedTime": d.metadata.get("modifiedTime", ""),
+            }
+            for i, d in enumerate(docs)
+        ]
+    }
+
+    return answer, docs, debug_info
+
+
+# =============== 5. 管理页面用：文档列表 & 手动重建 ===============
+
+def get_loaded_docs_summary() -> List[Dict[str, Any]]:
+    """
+    给 Streamlit 管理页面用：返回当前内存中最近一次 load 的文档列表概要。
+    注意：这是最近一次 build_or_load_vectorstore() / force_rebuild 调用时从 Drive 拉到的列表。
+    """
+    summaries: List[Dict[str, Any]] = []
+    for d in _last_loaded_docs:
+        summaries.append(
+            {
+                "source": d.metadata.get("source", ""),
+                "title": d.metadata.get("title", ""),
+                "modifiedTime": d.metadata.get("modifiedTime", ""),
+                "chars": len(d.page_content),
+            }
+        )
+    return summaries
+
+
+def force_rebuild_vectorstore() -> Dict[str, Any]:
+    """
+    给管理页面用：手动点按钮触发重建。
+    返回当前 index 的 meta 信息，方便展示。
+    """
+    _ = build_or_load_vectorstore(force_rebuild=True)
+    meta = _load_index_metadata()
+    return meta
 
 
 if __name__ == "__main__":
-    # 简单测试，可以按你自己的问题改
+    # 本地简单测试用
     tests = [
         "Ho5保单哪个公司能做？",
         "EPLI 主要保什么？",
@@ -197,6 +325,7 @@ if __name__ == "__main__":
     for q in tests:
         print("\n==============================")
         print("问题：", q)
-        ans, ds = answer_question(q)
+        ans, ds, dbg = answer_question(q)
         print("回答：", ans)
         print("引用的文档片段数量：", len(ds))
+        print("命中文档：", dbg.get("retrieved_sources"))
