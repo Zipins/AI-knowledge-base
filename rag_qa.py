@@ -1,7 +1,7 @@
 import os
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 PERSIST_DIR = "kb_chroma"
 
