@@ -1,22 +1,6 @@
 import streamlit as st
 from rag_qa import answer_question
-from build_index import build_index
 
-# ==== 知识库初始化（方案A：云端自动重建一次向量库） ====
-if "kb_built" not in st.session_state:
-    with st.spinner("正在初始化知识库（首次会稍微久一点）..."):
-        build_index()
-    st.session_state["kb_built"] = True
-# ==== 初始化结束 ====
-import os
-import streamlit as st
-
-if st.button("🔄 强制更新知识库"):
-    os.environ["KB_MODE"] = "refresh"
-    from rag_qa import get_vectordb
-    get_vectordb()
-    os.environ["KB_MODE"] = "runtime"
-    st.success("知识库已成功更新！")
 st.set_page_config(page_title="内部知识库助手", page_icon="🤖", layout="wide")
 
 st.title("🤖 公司内部 AI 知识库助手")
