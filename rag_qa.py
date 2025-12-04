@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 from load_kb import load_documents_from_drive
 
 # 模式：
