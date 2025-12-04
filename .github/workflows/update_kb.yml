@@ -2,8 +2,8 @@ name: Update Knowledge Base
 
 on:
   schedule:
-    - cron: "0 10 * * *"   # 每天 UTC 10 点自动运行
-  workflow_dispatch:        # 允许你在 Actions 里手动点一次运行
+    - cron: "0 10 * * *"
+  workflow_dispatch:
 
 jobs:
   build-kb:
@@ -34,10 +34,19 @@ jobs:
     - name: Build KB index
       run: python build_index.py
 
-    - name: Commit and push changes
+    - name: Force add vector index
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Actions"
-        git add kb_chroma
-        git commit -m "Auto-update KB index" || echo "No changes to commit"
-        git push
+
+        git add -A kb_chroma
+        date > kb_chroma/.updated
+        git add kb_chroma/.updated
+
+        git commit -m "Auto-update KB index $(date)" || echo "Nothing to commit"
+
+    - name: Push changes
+      uses: ad-m/github-push-action@v0.6.0
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
