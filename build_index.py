@@ -30,10 +30,6 @@ def build_index():
 
     # 3. Embedding + 存入 Chroma
     embeddings = OpenAIEmbeddings()
-
-    # 把全文写入 metadata
-    for d in split:
-        d.metadata["source_text"] = d.page_content
     
     vectordb = Chroma.from_documents(
         documents=split,
