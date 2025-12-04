@@ -8,14 +8,12 @@ from langchain_core.documents import Document
 from load_kb import load_documents_from_drive
 
 def get_vectordb() -> Chroma:
-    if KB_MODE == "refresh":
-        return rebuild_vectordb()
-
-    embeddings = OpenAIEmbeddings()
+    ...
     vectordb = Chroma(
         embedding_function=embeddings,
         persist_directory=PERSIST_DIR,
     )
+    print("👉 DEBUG: 加载向量库，文档数量 =", vectordb._collection.count())
     return vectordb
 
 # 模式：
