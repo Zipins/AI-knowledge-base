@@ -5,48 +5,61 @@ on:
     - cron: "0 10 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-kb:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
 
-    - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-    - name: Restore Google credentials
-      run: |
-        echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
-        echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+      - name: Restore Google credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+          echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
 
-    - name: Set environment variables
-      run: |
-        echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+      - name: Set environment variables
+        run: |
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
 
-    - name: Build KB index
-      run: python build_index.py
+      - name: Build KB index
+        run: python build_index.py
 
-    - name: Force add vector index
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Actions"
+      - name: Commit update marker only (do NOT commit sqlite)
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Actions"
 
-        git add -A kb_chroma
-        date > kb_chroma/.updated
-        git add kb_chroma/.updated
+          # Ensure chroma db artifacts are ignored (idempotent append)
+          touch .gitignore
+          grep -qxF "kb_chroma/" .gitignore || echo "kb_chroma/" >> .gitignore
+          grep -qxF "**/chroma.sqlite3" .gitignore || echo "**/chroma.sqlite3" >> .gitignore
+          grep -qxF "**/*.sqlite3" .gitignore || echo "**/*.sqlite3" >> .gitignore
 
-        git commit -m "Auto-update KB index $(date)" || echo "Nothing to commit"
+          # If kb_chroma was ever tracked before, remove it from git index (safe if not tracked)
+          git rm -r --cached kb_chroma 2>/dev/null || true
 
-    - name: Push changes
-      uses: ad-m/github-push-action@v0.6.0
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        branch: main
+          # Write/update marker file
+          mkdir -p kb_chroma
+          date -u > kb_chroma/.updated
+
+          git add .gitignore kb_chroma/.updated
+          git commit -m "Auto-update KB marker $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "Nothing to commit"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@v0.6.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: main
