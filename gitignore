@@ -1,0 +1,4 @@
+# chroma / vector db artifacts
+kb_chroma/
+**/chroma.sqlite3
+**/*.sqlite3
