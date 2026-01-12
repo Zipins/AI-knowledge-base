@@ -37,25 +37,15 @@ jobs:
       - name: Build KB index
         run: python build_index.py
 
-      - name: Commit update marker only (do NOT commit sqlite)
+      - name: Commit update marker only
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Actions"
 
-          # Ensure chroma db artifacts are ignored (idempotent append)
-          touch .gitignore
-          grep -qxF "kb_chroma/" .gitignore || echo "kb_chroma/" >> .gitignore
-          grep -qxF "**/chroma.sqlite3" .gitignore || echo "**/chroma.sqlite3" >> .gitignore
-          grep -qxF "**/*.sqlite3" .gitignore || echo "**/*.sqlite3" >> .gitignore
-
-          # If kb_chroma was ever tracked before, remove it from git index (safe if not tracked)
-          git rm -r --cached kb_chroma 2>/dev/null || true
-
-          # Write/update marker file
           mkdir -p kb_chroma
           date -u > kb_chroma/.updated
 
-          git add .gitignore kb_chroma/.updated
+          git add kb_chroma/.updated
           git commit -m "Auto-update KB marker $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "Nothing to commit"
 
       - name: Push changes
